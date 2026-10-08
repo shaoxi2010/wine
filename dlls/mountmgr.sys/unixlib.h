@@ -96,7 +96,14 @@ struct set_dosdev_symlink_params
 struct physicaldrive_symlink_params
 {
     const char *device;  /* unix device of the whole disk */
-    const char *name;    /* dosdevices link name, e.g. "physicaldrive1" */
+    int do_remove;       /* remove the symlink instead of creating it */
+};
+
+struct get_device_minor_params
+{
+    const char *device;      /* unix device (whole disk or partition) */
+    unsigned int disk_minor; /* minor of the whole disk */
+    unsigned int partition;  /* partition number, 0 for a whole disk */
 };
 
 struct get_volume_dos_devices_params
@@ -201,6 +208,7 @@ enum mountmgr_funcs
     unix_delete_credential,
     unix_enumerate_credentials,
     unix_update_physicaldrive_symlink,
+    unix_get_device_minor,
     unix_funcs_count
 };
 

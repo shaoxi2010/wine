@@ -319,13 +319,16 @@ static NTSTATUS set_dosdev_symlink( void *args )
 }
 
 /* Create or remove the dosdevices symlink exposing a whole disk as
- * \\.\PHYSICALDRIVE1. Partition nodes are rejected: SG_IO is not supported
- * on them. This runs entirely on the Unix side (no output parameters) so
- * that it works regardless of which process the unix library is loaded in. */
+ * \\.\PHYSICALDRIVE<minor>.  <minor> is the whole-disk device minor, the
+ * same number ntdll reports from IOCTL_STORAGE_GET_DEVICE_NUMBER, so the
+ * name stays consistent across device re-enumeration.  Partition nodes are
+ * rejected: SG_IO is not supported on them.  This runs entirely on the Unix
+ * side (no output parameters) so that it works regardless of which process
+ * the unix library is loaded in. */
 static NTSTATUS update_physicaldrive_symlink( void *args )
 {
     const struct physicaldrive_symlink_params *params = args;
-    char path[256], *link_path;
+    char path[600], name[32], *link_path;
     const char *base;
     struct stat st;
     NTSTATUS status = STATUS_SUCCESS;
@@ -337,11 +340,78 @@ static NTSTATUS update_physicaldrive_symlink( void *args )
     snprintf( path, sizeof(path), "/sys/class/block/%s/partition", base );
     if (access( path, F_OK ) != -1) return STATUS_SUCCESS;  /* partition, not a whole disk */
 
-    if (!(link_path = get_dosdevices_path( params->name ))) return STATUS_NO_MEMORY;
+    snprintf( name, sizeof(name), "physicaldrive%u", minor( st.st_rdev ));
+    if (!(link_path = get_dosdevices_path( name ))) return STATUS_NO_MEMORY;
     unlink( link_path );
-    if (symlink( params->device, link_path ) == -1) status = errno_to_status( errno );
+    if (!params->do_remove && symlink( params->device, link_path ) == -1)
+        status = errno_to_status( errno );
     free( link_path );
     return status;
+}
+
+
+/* Return the whole-disk device minor of a unix device, resolving a
+ * partition node to the disk it belongs to, plus the partition number
+ * (0 for a whole disk).  This is the number ntdll reports from
+ * IOCTL_STORAGE_GET_DEVICE_NUMBER and after which the PHYSICALDRIVE
+ * symlink is named. */
+static NTSTATUS get_device_minor( void *args )
+{
+    struct get_device_minor_params *params = args;
+    char path[600], target[512], *base;
+    struct stat st;
+    unsigned int dev_minor, disk_minor = 0;
+    int is_partition = 0, have_disk = 0;
+    ssize_t len;
+    FILE *f;
+
+    if (stat( params->device, &st ) == -1) return errno_to_status( errno );
+    if (!S_ISBLK( st.st_mode ) || !major( st.st_rdev ))
+    {
+        params->disk_minor = 0;
+        params->partition = 0;
+        return STATUS_SUCCESS;
+    }
+    dev_minor = minor( st.st_rdev );
+
+    snprintf( path, sizeof(path), "/sys/dev/block/%u:%u", major( st.st_rdev ), dev_minor );
+    if ((len = readlink( path, target, sizeof(target) - 1 )) > 0)
+    {
+        target[len] = 0;
+        base = strrchr( target, '/' );
+        base = base ? base + 1 : target;
+        snprintf( path, sizeof(path), "/sys/class/block/%s/partition", base );
+        if (access( path, F_OK ) != -1)
+        {
+            is_partition = 1;
+            if (base > target) base[-1] = 0;
+            base = strrchr( target, '/' );
+            base = base ? base + 1 : target;
+        }
+        snprintf( path, sizeof(path), "/sys/class/block/%s/dev", base );
+        if ((f = fopen( path, "r" )))
+        {
+            unsigned int maj, min;
+            if (fscanf( f, "%u:%u", &maj, &min ) == 2)
+            {
+                disk_minor = min;
+                have_disk = 1;
+            }
+            fclose( f );
+        }
+    }
+
+    if (is_partition && have_disk)
+    {
+        params->disk_minor = disk_minor;
+        params->partition = (dev_minor > disk_minor) ? dev_minor - disk_minor : 0;
+    }
+    else
+    {
+        params->disk_minor = dev_minor;
+        params->partition = 0;
+    }
+    return STATUS_SUCCESS;
 }
 
 
@@ -666,6 +736,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     delete_credential,
     enumerate_credentials,
     update_physicaldrive_symlink,
+    get_device_minor,
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );

@@ -45,10 +45,10 @@ struct disk_device;
  * dosdevices symlink instead of an NT device symlink: SCSI pass-through
  * ioctls on the resulting unix device handle are then handled in-process by
  * ntdll, while a mountmgr device object would have its IRPs processed by the
- * winedevice process, which cannot access the caller's data buffer. The
- * fixed name pairs with ntdll's IOCTL_STORAGE_GET_DEVICE_NUMBER, which
- * reports device number 1 for unix device handles. */
-static const char physicaldrive_symlink_name[] = "physicaldrive1";
+ * winedevice process, which cannot access the caller's data buffer.  <n> is
+ * the whole-disk device minor, the same number that ntdll reports from
+ * IOCTL_STORAGE_GET_DEVICE_NUMBER, so the name follows the device across
+ * re-enumeration and several readers can coexist. */
 
 static const WCHAR drive_types[][8] =
 {
@@ -100,13 +100,13 @@ struct disk_device
     struct volume        *volume;      /* associated volume */
 };
 
-/* point the PHYSICALDRIVE symlink at the device's unix device (dest == NULL removes it) */
-static void update_physicaldrive_symlink( struct disk_device *device, const char *dest )
+/* point the PHYSICALDRIVE symlink at the device's unix device (do_remove clears it) */
+static void update_physicaldrive_symlink( struct disk_device *device, BOOL do_remove )
 {
-    struct set_dosdev_symlink_params params = { physicaldrive_symlink_name, dest };
+    struct physicaldrive_symlink_params params = { device->unix_device, do_remove };
 
-    if (device->type != DEVICE_HARDDISK) return;
-    MOUNTMGR_CALL( set_dosdev_symlink, &params );
+    if (device->type != DEVICE_HARDDISK || !device->unix_device) return;
+    MOUNTMGR_CALL( update_physicaldrive_symlink, &params );
 }
 
 struct volume
@@ -756,7 +756,7 @@ static void delete_disk_device( struct disk_device *device )
         IoDeleteSymbolicLink( &device->symlink );
         RtlFreeUnicodeString( &device->symlink );
     }
-    update_physicaldrive_symlink( device, NULL );
+    update_physicaldrive_symlink( device, TRUE );
     free( device->unix_device );
     free( device->disk_serial );
     RtlFreeUnicodeString( &device->name );
@@ -1025,9 +1025,19 @@ static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive,
 
     if (disk_device->unix_device && disk_device->type == DEVICE_HARDDISK)
     {
-        struct physicaldrive_symlink_params params = { disk_device->unix_device, "physicaldrive1" };
+        struct get_device_minor_params minor_params = { disk_device->unix_device, 0, 0 };
+        struct physicaldrive_symlink_params params = { disk_device->unix_device, FALSE };
 
-        /* Expose \\.\PHYSICALDRIVE1 as a dosdevices symlink so that SCSI
+        /* Keep IOCTL_STORAGE_GET_DEVICE_NUMBER consistent with the
+         * PHYSICALDRIVE<minor> symlink name and with ntdll's answer for the
+         * raw device: report the whole-disk device minor. */
+        if (!MOUNTMGR_CALL( get_device_minor, &minor_params ))
+        {
+            disk_device->devnum.DeviceNumber = minor_params.disk_minor;
+            disk_device->devnum.PartitionNumber = minor_params.partition;
+        }
+
+        /* Expose \\.\PHYSICALDRIVE<minor> as a dosdevices symlink so that SCSI
          * pass-through ioctls are handled in-process by ntdll: the mountmgr
          * device object lives in the winedevice process, which cannot access
          * the caller's SCSI_PASS_THROUGH_DIRECT data buffer. The Unix side

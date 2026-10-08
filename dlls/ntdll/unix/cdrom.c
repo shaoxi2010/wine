@@ -728,11 +728,71 @@ static NTSTATUS CDROM_GetControl(int dev, int fd, CDROM_AUDIO_CONTROL* cac)
 static NTSTATUS CDROM_GetDeviceNumber(int dev, int fd, STORAGE_DEVICE_NUMBER* devnum)
 {
     struct stat st;
+    char path[64], target[512], *base;
+    unsigned int dev_minor, disk_minor = 0;
+    int is_partition = 0, have_disk = 0;
+    ssize_t len;
+    FILE *f;
 
     if (fstat( fd, &st ) == -1) return errno_to_status( errno );
     devnum->DeviceType = FILE_DEVICE_DISK;
-    devnum->DeviceNumber = minor( st.st_rdev );
-    devnum->PartitionNumber = 0;
+
+    if (!S_ISBLK( st.st_mode ) || !major( st.st_rdev ))
+    {
+        TRACE( "dev %d fd %d not a unix block device (rdev=%lx), reporting 0/0\n",
+               dev, fd, (unsigned long)st.st_rdev );
+        devnum->DeviceNumber = 0;
+        devnum->PartitionNumber = 0;
+        return STATUS_SUCCESS;
+    }
+    dev_minor = minor( st.st_rdev );
+
+    /* Resolve the device to its whole disk: the readlink of the sysfs node
+     * /sys/dev/block/<maj>:<min> ends in ".../block/<disk>[/<part>]", so a
+     * partition node can be mapped back to the disk it belongs to.  The
+     * whole-disk minor is what mountmgr uses to name the dosdevices
+     * "physicaldrive<n>" symlink, keeping IOCTL_STORAGE_GET_DEVICE_NUMBER
+     * and the \\.\PHYSICALDRIVE<n> namespace consistent. */
+    sprintf( path, "/sys/dev/block/%u:%u", major( st.st_rdev ), dev_minor );
+    if ((len = readlink( path, target, sizeof(target) - 1 )) > 0)
+    {
+        target[len] = 0;
+        base = strrchr( target, '/' );
+        base = base ? base + 1 : target;
+        sprintf( path, "/sys/class/block/%s/partition", base );
+        if (access( path, F_OK ) != -1)
+        {
+            /* partition node: the whole disk is the parent directory */
+            is_partition = 1;
+            if (base > target) base[-1] = 0;
+            base = strrchr( target, '/' );
+            base = base ? base + 1 : target;
+        }
+        sprintf( path, "/sys/class/block/%s/dev", base );
+        if ((f = fopen( path, "r" )))
+        {
+            unsigned int maj, min;
+            if (fscanf( f, "%u:%u", &maj, &min ) == 2)
+            {
+                disk_minor = min;
+                have_disk = 1;
+            }
+            fclose( f );
+        }
+    }
+
+    if (is_partition && have_disk)
+    {
+        devnum->DeviceNumber = disk_minor;
+        devnum->PartitionNumber = (dev_minor > disk_minor) ? dev_minor - disk_minor : 0;
+    }
+    else
+    {
+        devnum->DeviceNumber = dev_minor;
+        devnum->PartitionNumber = 0;
+    }
+    TRACE( "dev %d fd %d -> device %u partition %u\n", dev, fd,
+           devnum->DeviceNumber, devnum->PartitionNumber );
     return STATUS_SUCCESS;
 }
 
