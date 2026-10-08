@@ -725,12 +725,14 @@ static NTSTATUS CDROM_GetControl(int dev, int fd, CDROM_AUDIO_CONTROL* cac)
  *		CDROM_GetDeviceNumber
  *
  */
-static NTSTATUS CDROM_GetDeviceNumber(int dev, STORAGE_DEVICE_NUMBER* devnum)
+static NTSTATUS CDROM_GetDeviceNumber(int dev, int fd, STORAGE_DEVICE_NUMBER* devnum)
 {
-    FIXME( "stub\n" );
+    struct stat st;
+
+    if (fstat( fd, &st ) == -1) return errno_to_status( errno );
     devnum->DeviceType = FILE_DEVICE_DISK;
-    devnum->DeviceNumber = 1;
-    devnum->PartitionNumber = 1;
+    devnum->DeviceNumber = minor( st.st_rdev );
+    devnum->PartitionNumber = 0;
     return STATUS_SUCCESS;
 }
 
@@ -2998,7 +3000,7 @@ NTSTATUS cdrom_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc
         sz = sizeof(STORAGE_DEVICE_NUMBER);
         if (in_buffer != NULL || in_size != 0) status = STATUS_INVALID_PARAMETER;
         else if (out_size < sz) status = STATUS_BUFFER_TOO_SMALL;
-        else status = CDROM_GetDeviceNumber(dev, out_buffer);
+        else status = CDROM_GetDeviceNumber(dev, fd, out_buffer);
         break;
 
     case IOCTL_STORAGE_RESET_DEVICE:

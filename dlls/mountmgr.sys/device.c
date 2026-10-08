@@ -39,6 +39,17 @@ WINE_DEFAULT_DEBUG_CHANNEL(mountmgr);
 #define MAX_DOS_DRIVES 26
 #define MAX_PORTS 256
 
+struct disk_device;
+
+/* The \\.\PHYSICALDRIVE<n> namespace is exposed to applications through a
+ * dosdevices symlink instead of an NT device symlink: SCSI pass-through
+ * ioctls on the resulting unix device handle are then handled in-process by
+ * ntdll, while a mountmgr device object would have its IRPs processed by the
+ * winedevice process, which cannot access the caller's data buffer. The
+ * fixed name pairs with ntdll's IOCTL_STORAGE_GET_DEVICE_NUMBER, which
+ * reports device number 1 for unix device handles. */
+static const char physicaldrive_symlink_name[] = "physicaldrive1";
+
 static const WCHAR drive_types[][8] =
 {
     L"",        /* DEVICE_UNKNOWN */
@@ -88,6 +99,15 @@ struct disk_device
     char                 *disk_serial; /* disk serial number */
     struct volume        *volume;      /* associated volume */
 };
+
+/* point the PHYSICALDRIVE symlink at the device's unix device (dest == NULL removes it) */
+static void update_physicaldrive_symlink( struct disk_device *device, const char *dest )
+{
+    struct set_dosdev_symlink_params params = { physicaldrive_symlink_name, dest };
+
+    if (device->type != DEVICE_HARDDISK) return;
+    MOUNTMGR_CALL( set_dosdev_symlink, &params );
+}
 
 struct volume
 {
@@ -627,7 +647,6 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
     case DEVICE_HARDDISK:
     case DEVICE_NETWORK:  /* FIXME */
         format = L"\\Device\\Harddisk%u";
-        link_format = L"\\??\\PhysicalDrive%u";
         nt_type = FILE_DEVICE_DISK;
         break;
     case DEVICE_HARDDISK_VOL:
@@ -737,6 +756,7 @@ static void delete_disk_device( struct disk_device *device )
         IoDeleteSymbolicLink( &device->symlink );
         RtlFreeUnicodeString( &device->symlink );
     }
+    update_physicaldrive_symlink( device, NULL );
     free( device->unix_device );
     free( device->disk_serial );
     RtlFreeUnicodeString( &device->name );
@@ -1002,6 +1022,19 @@ static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive,
     }
     disk_device->unix_device = strdup( unix_device );
     disk_device->disk_serial = strdup( disk_serial );
+
+    if (disk_device->unix_device && disk_device->type == DEVICE_HARDDISK)
+    {
+        struct physicaldrive_symlink_params params = { disk_device->unix_device, "physicaldrive1" };
+
+        /* Expose \\.\PHYSICALDRIVE1 as a dosdevices symlink so that SCSI
+         * pass-through ioctls are handled in-process by ntdll: the mountmgr
+         * device object lives in the winedevice process, which cannot access
+         * the caller's SCSI_PASS_THROUGH_DIRECT data buffer. The Unix side
+         * only creates the link for whole disks, SG_IO is rejected on
+         * partition nodes. */
+        MOUNTMGR_CALL( update_physicaldrive_symlink, &params );
+    }
 
     free( volume->unix_mount );
     volume->unix_mount = strdup( mount_point );
@@ -1873,8 +1906,9 @@ static NTSTATUS WINAPI disk_ioctl( DEVICE_OBJECT *device, IRP *irp )
     struct disk_device *dev = device->DeviceExtension;
     NTSTATUS status;
 
-    TRACE( "ioctl %lx insize %lu outsize %lu\n",
-           irpsp->Parameters.DeviceIoControl.IoControlCode,
+    TRACE( "ioctl %lx type %u unixdev %s fsctx %p insize %lu outsize %lu\n",
+           irpsp->Parameters.DeviceIoControl.IoControlCode, dev->type,
+           debugstr_a(dev->unix_device), irpsp->FileObject->FsContext,
            irpsp->Parameters.DeviceIoControl.InputBufferLength,
            irpsp->Parameters.DeviceIoControl.OutputBufferLength );
 
@@ -1971,7 +2005,8 @@ static NTSTATUS WINAPI disk_ioctl( DEVICE_OBJECT *device, IRP *irp )
     {
         ULONG code = irpsp->Parameters.DeviceIoControl.IoControlCode;
 
-        if (dev->type == DEVICE_CDROM || dev->type == DEVICE_DVD)
+        if (dev->type == DEVICE_CDROM || dev->type == DEVICE_DVD ||
+            (dev->type == DEVICE_HARDDISK && dev->unix_device))
         {
             struct cdrom_ioctl_params params;
 
@@ -2010,7 +2045,8 @@ static NTSTATUS WINAPI disk_create( DEVICE_OBJECT *device, IRP *irp )
     struct disk_device *dev = device->DeviceExtension;
     NTSTATUS status;
 
-    if (dev->type == DEVICE_CDROM || dev->type == DEVICE_DVD)
+    if (dev->type == DEVICE_CDROM || dev->type == DEVICE_DVD ||
+        (dev->type == DEVICE_HARDDISK && dev->unix_device))
     {
         struct cdrom_open_params params = {.unix_device = dev->unix_device};
         if (!(status = MOUNTMGR_CALL( cdrom_open, &params )))
@@ -2030,7 +2066,8 @@ static NTSTATUS WINAPI disk_close( DEVICE_OBJECT *device, IRP *irp )
     struct disk_device *dev = device->DeviceExtension;
     NTSTATUS status;
 
-    if (dev->type == DEVICE_CDROM || dev->type == DEVICE_DVD)
+    if (dev->type == DEVICE_CDROM || dev->type == DEVICE_DVD ||
+        (dev->type == DEVICE_HARDDISK && dev->unix_device))
         status = MOUNTMGR_CALL( cdrom_close, stack->FileObject->FsContext );
     else
         status = STATUS_SUCCESS;

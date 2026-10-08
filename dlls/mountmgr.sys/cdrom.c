@@ -2037,6 +2037,10 @@ static NTSTATUS scsi_pass_through_direct( struct cdrom *cdrom, const SCSI_PASS_T
     cmd.sbp          = (unsigned char *)out_pkt + in_pkt->SenseInfoOffset;
     cmd.timeout      = in_pkt->TimeOutValue * 1000;
 
+    TRACE( "sg_io fd=%d cdb[0]=%#x dir=%u len=%u dxferp=%p\n",
+           cdrom->fd, in_pkt->Cdb[0], in_pkt->DataIn,
+           in_pkt->DataTransferLength, cmd.dxferp );
+
     switch (in_pkt->DataIn)
     {
     case SCSI_IOCTL_DATA_IN:
@@ -2053,7 +2057,10 @@ static NTSTATUS scsi_pass_through_direct( struct cdrom *cdrom, const SCSI_PASS_T
     }
 
     if (ioctl( cdrom->fd, SG_IO, &cmd ))
+    {
+        WARN( "SG_IO DIRECT failed: errno %d dxferp=%p\n", errno, cmd.dxferp );
         return errno_to_status( errno );
+    }
 
     out_pkt->ScsiStatus         = cmd.status;
     out_pkt->DataTransferLength = in_pkt->DataTransferLength - cmd.resid;

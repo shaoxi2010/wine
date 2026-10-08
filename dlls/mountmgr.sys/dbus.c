@@ -438,6 +438,11 @@ static void udisks2_add_device( const char *udi, DBusMessageIter *dict, DBusMess
             drive_type = DEVICE_DVD;
         }
     }
+    /* Removable disks without a known media compatibility (e.g. USB card
+     * readers) are reported as removable hard disks so that they get a
+     * PhysicalDrive symlink and a removable drive type. */
+    if (drive_type == DEVICE_UNKNOWN && removable)
+        drive_type = DEVICE_HARDDISK;
     if (device)
     {
         if (removable) queue_device_op( ADD_DOS_DEVICE, udi, device, mount_point, drive_type, guid_ptr, id, label, NULL );

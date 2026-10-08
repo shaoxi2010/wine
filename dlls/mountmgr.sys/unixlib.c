@@ -41,6 +41,9 @@
 # include <sys/param.h>
 #endif
 #include <unistd.h>
+#ifdef MAJOR_IN_SYSMACROS
+#include <sys/sysmacros.h>
+#endif
 
 #include "unixlib.h"
 #include "wine/debug.h"
@@ -314,6 +317,33 @@ static NTSTATUS set_dosdev_symlink( void *args )
     free( path );
     return status;
 }
+
+/* Create or remove the dosdevices symlink exposing a whole disk as
+ * \\.\PHYSICALDRIVE1. Partition nodes are rejected: SG_IO is not supported
+ * on them. This runs entirely on the Unix side (no output parameters) so
+ * that it works regardless of which process the unix library is loaded in. */
+static NTSTATUS update_physicaldrive_symlink( void *args )
+{
+    const struct physicaldrive_symlink_params *params = args;
+    char path[256], *link_path;
+    const char *base;
+    struct stat st;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (stat( params->device, &st ) == -1) return errno_to_status( errno );
+
+    base = strrchr( params->device, '/' );
+    base = base ? base + 1 : params->device;
+    snprintf( path, sizeof(path), "/sys/class/block/%s/partition", base );
+    if (access( path, F_OK ) != -1) return STATUS_SUCCESS;  /* partition, not a whole disk */
+
+    if (!(link_path = get_dosdevices_path( params->name ))) return STATUS_NO_MEMORY;
+    unlink( link_path );
+    if (symlink( params->device, link_path ) == -1) status = errno_to_status( errno );
+    free( link_path );
+    return status;
+}
+
 
 #ifdef __APPLE__
 static LONGLONG get_free_bytes_for_important_data(int fd)
@@ -635,6 +665,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     write_credential,
     delete_credential,
     enumerate_credentials,
+    update_physicaldrive_symlink,
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );

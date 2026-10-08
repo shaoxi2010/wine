@@ -93,6 +93,12 @@ struct set_dosdev_symlink_params
     const char *dest;
 };
 
+struct physicaldrive_symlink_params
+{
+    const char *device;  /* unix device of the whole disk */
+    const char *name;    /* dosdevices link name, e.g. "physicaldrive1" */
+};
+
 struct get_volume_dos_devices_params
 {
     const char *mount_point;
@@ -194,6 +200,7 @@ enum mountmgr_funcs
     unix_write_credential,
     unix_delete_credential,
     unix_enumerate_credentials,
+    unix_update_physicaldrive_symlink,
     unix_funcs_count
 };
 
